@@ -98,13 +98,14 @@ def convert_to_npz(pop, output_path):
             nslots=np.uint32(SLOTS),
             time=np.uint32(0),
             not_home_probs=np.array([p.time_use.not_home for p in pop.people]),
-            # TODO Plumb along
-            lockdown_multipliers=np.ones(100, dtype=np.float32),
+            lockdown_multipliers=np.array(pop.lockdown.per_day, dtype=np.float32),
             place_activities=id_mapping.place_activities,
             place_coords=place_coords,
             place_hazards=np.zeros(num_places, dtype=np.uint32),
             place_counts=np.zeros(num_places, dtype=np.uint32),
-            people_ages=np.array([p.demographics.age_years for p in pop.people], dtype=np.uint16),
+            people_ages=np.array(
+                [p.demographics.age_years for p in pop.people], dtype=np.uint16
+            ),
             people_obesity=np.array(
                 [obesity_value(p.health.bmi) for p in pop.people], dtype=np.uint16
             ),
@@ -151,7 +152,7 @@ def get_baseline_flows(pop, id_mapping):
         idx = person.id * places_to_keep_per_person
         # Per person, flatten all the flows, regardless of activity
         for (activity, venue, weight) in get_baseline_flows_per_person(
-            person, places_to_keep_per_person
+            pop, person, places_to_keep_per_person
         ):
             people_place_ids[idx] = id_mapping.to_place(activity, venue)
             people_baseline_flows[idx] = weight
@@ -160,12 +161,26 @@ def get_baseline_flows(pop, id_mapping):
     return (people_place_ids, people_baseline_flows)
 
 
-def get_baseline_flows_per_person(person, places_to_keep_per_person):
+def get_baseline_flows_per_person(pop, person, places_to_keep_per_person):
     result = []
-    for flows in person.flows_per_activity:
+
+    # Home and work are per-person
+    result.append((synthpop_pb2.Activity.HOME, person.household, 1.0))
+    if person.workplace != 2 ** 64 - 1:
+        result.append((synthpop_pb2.Activity.WORK, person.workplace, 1.0))
+
+    # Build a map from activity to duration
+    activity_durations = dict(
+        [(x.activity, x.duration) for x in person.activity_durations]
+    )
+
+    # The other flows are the same for everyone in the MSOA
+    msoa = pop.households[person.household].msoa
+    for flows in pop.info_per_msoa[msoa].flows_per_activity:
+        # Weight the per-activity flow by duration
+        activity_duration = activity_durations[flows.activity]
         for flow in flows.flows:
-            # Weight the per-activity flow by duration
-            weight = flows.activity_duration * flow.weight
+            weight = activity_duration * flow.weight
             result.append((flows.activity, flow.venue_id, weight))
 
     # Sort by flows, descending
@@ -192,7 +207,7 @@ def get_place_coordinates(pop, id_mapping):
     # critical.
     for household in pop.households:
         place = id_mapping.to_place(synthpop_pb2.Activity.HOME, household.id)
-        # TODO This should crash if we have no buildings in the MSOA
+        # Every MSOA is guaranteed to have buildings
         location = random.choice(pop.info_per_msoa[household.msoa].buildings)
         result[place * 2] = location.latitude
         result[place * 2 + 1] = location.longitude
